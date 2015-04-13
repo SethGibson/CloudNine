@@ -63,5 +63,11 @@
     <None Include="..\assets\skybox.vert">
       <Filter>Source Files\shaders</Filter>
     </None>
+    <None Include="..\assets\particle.frag">
+      <Filter>Source Files\shaders</Filter>
+    </None>
+    <None Include="..\assets\particle.vert">
+      <Filter>Source Files\shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>

@@ -115,6 +115,8 @@
   <ItemGroup>
     <None Include="..\assets\cloud.frag" />
     <None Include="..\assets\cloud.vert" />
+    <None Include="..\assets\particle.frag" />
+    <None Include="..\assets\particle.vert" />
     <None Include="..\assets\skybox.frag" />
     <None Include="..\assets\skybox.vert" />
   </ItemGroup>

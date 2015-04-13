@@ -1,43 +1,3 @@
-/* MODES:
-Rain
-Thermals 2
-Z_Vector(?)
-Cubes
-Spheres
-Points
-Circles and lines
-Connected
-Color Inversion
-Periodic size
-Delaunay/Voronoi
-Bloom/Glow
-Environment
-Scanner/Plane Scanner
-Outline/Edges
-God Rays
-Space!
-Galaxy/Supernova effect
-Wireframe primitives
-Flow noise/transparency
-Points+Primitives
-Fog
-Glowing Lines
-Random Glowing Points
-Simple/flat shading/hard edges
-Glitch
-Lens flare
-Spherical distortion
-Perlin Noise
-Walkers/Tracers
-Fractals/fbm
-"Buildings"
-"Soft Particles"
-Alpha Particles/Sprites
-Reflect the point cloud
-Physics?
-Plasma/implicit surfaces?
-*/
-
 #ifdef _DEBUG
 #pragma comment(lib, "DSAPI.dbg.lib")
 #else
@@ -49,10 +9,12 @@ Plasma/implicit surfaces?
 #include "cinder/gl/Batch.h"
 #include "cinder/gl/Texture.h"
 #include "cinder/gl/GlslProg.h"
-#include "cinder/GeomIo.h"
 #include "cinder/Camera.h"
+#include "cinder/GeomIo.h"
 #include "cinder/MayaCamUI.h"
 #include "cinder/params/Params.h"
+#include "cinder/Rand.h"
+#include "cinder/Perlin.h"
 #include "CiDSAPI.h"
 
 using namespace ci;
@@ -61,6 +23,8 @@ using namespace ci::params;
 using namespace std;
 using namespace CinderDS;
 
+static float S_MIN_Z = 100.0f;
+static float S_MAX_Z = 1000.0f;
 
 class CloudNineApp : public App
 {
@@ -75,19 +39,25 @@ public:
 private:
 	void setupDS();
 	void setupScene();
+	void setupPointCloud();
+	void setupParticles();
 	void setupFBO();
 	void setupGUI();
 
 	void updatePointCloud();
+	void updateParticles();
 	void updateFBO();
 
 	void drawPointCloud();
+	void drawParticles();
 	void drawSkyBox();
 	void drawGUI();
 
 	//DSAPI
 	CinderDSRef			mCinderDS;
 	gl::Texture2dRef	mTexRgb;
+	Channel16u			mChanDepth;
+	ivec2				mDepthDims;
 
 	//PointCloud
 	struct CloudPoint
@@ -95,16 +65,90 @@ private:
 		vec3 PPosition;
 		vec2 PUV;
 		float PSize;
-		CloudPoint(vec3 pPos, vec2 pUV, float pSize) : PPosition(pPos), PUV(pUV), PSize(pSize){}
+		CloudPoint(vec3 pPos, vec2 pUV, float pSize) :
+			PPosition(pPos),
+			PUV(pUV),
+			PSize(pSize)
+		{}
 	};
 
+	struct CloudParticle
+	{
+		vec3 PPosition;
+		float PSize;
+		float PSize_0;
+		ColorA PColor;
+		ColorA PColor_0;
+		vec3 PAccel;
+		float PGrav;
+		int PAge;
+		int PLife;
+
+		CloudParticle(vec3 pPos, vec3 pAcc, float pSize, int pLife, ColorA pColor) : 
+			PPosition(pPos),
+			PAccel(pAcc),
+			PSize(pSize),
+			PAge(pLife),
+			PLife(pLife),
+			PColor(pColor),
+			PColor_0(pColor),
+			PSize_0(pSize)
+		{
+			PGrav = pAcc.y*2.f;
+		}
+
+		void step(Perlin &pPerlin, int pMode, ColorA pColor0)
+		{
+			float cNormAge = static_cast<float>(PAge) / static_cast<float>(PLife);
+
+			switch(pMode)
+			{
+				case 0:
+				{
+					PPosition.y -= PAccel.y;
+					float cNoise = pPerlin.fBm(vec3(PPosition.x*0.005f, PPosition.y*0.01f, PPosition.z*0.005f));
+					float cAngle = cNoise*15.0f;
+					PPosition.x += cos(cAngle)*PAccel.x*(1.0 - cNormAge);
+					PPosition.z += sin(cAngle)*PAccel.z*(1.0 - cNormAge);
+					PAccel.x *= 1.001f;
+					PAccel.y *= .99f;
+					PAccel.z *= 1.001f;
+					break;
+				}
+				case 1:
+				{
+					if (cNormAge < 0.98f)
+					{
+						PPosition.y += PGrav;
+						PGrav *= 1.005f;
+					}
+					break;
+				}
+			}
+			PAge -= 1;
+			PColor = lerp<ColorA>(PColor_0, pColor0, cNormAge);
+
+			PSize = PSize_0 * cNormAge;
+		}
+	};
+
+	//Particles
+	vector<CloudParticle>	mPointsParticles;
+	vector<ColorA>			mColorsParticles;
+	gl::VboRef				mDataInstance_P;
+	geom::BufferLayout		mAttribsInstance_P;
+	gl::VboMeshRef			mMesh_P;
+	gl::GlslProgRef			mShader_P;
+	gl::BatchRef			mBatch_P;
+	Perlin					mPerlin;
+
+	//Point Cloud 
 	vector<CloudPoint>	mPointsCloud;
 	gl::VboRef			mDataInstance;
 	geom::BufferLayout	mAttribsInstance;
 	gl::VboMeshRef		mMeshCloud;
 	gl::GlslProgRef		mShaderCloud;
 	gl::BatchRef		mBatchCloud;
-
 
 	//Skybox
 	geom::Cube				mMeshSkyBox;
@@ -115,12 +159,16 @@ private:
 
 	CameraPersp				mCamera;
 	MayaCamUI				mMayaCam;
+
+	//Settings
 	InterfaceGlRef			mGUI;
 
 	int						mParamCloudRes,
 							mParamCloudModeIndex,
 							mParamColorIndex,
-							mParamISphereSubd;
+							mParamPModeIndex,
+							mParamSpawnCount,
+							mParamMaxCount;
 
 	float					mParamSize,
 							mParamLightPosX,
@@ -128,21 +176,24 @@ private:
 							mParamLightPosZ,
 							mParamSpecPow,
 							mParamSpecStr,
-							mParamAmbStr;
+							mParamAmbStr,
+							mParamReflStr;
 
 	vector<string>			mParamCloudMode;
 	vector<string>			mParamSkyBoxes;
 	vector<string>			mParamColors;
+	vector<string>			mParamPModes;
+
 
 };
 
 void CloudNineApp::setup()
 {
-
+	setupGUI();
 	setupDS();
 	setupScene();
 	setupFBO();
-	setupGUI();
+
 
 	gl::enableDepthRead();
 	gl::enableDepthWrite();
@@ -155,7 +206,10 @@ void CloudNineApp::setupDS()
 	mCinderDS->initDepth(FrameSize::DEPTHQVGA, 60);
 	mCinderDS->initRgb(FrameSize::RGBVGA, 60);
 	mCinderDS->start();
+
+	mDepthDims = mCinderDS->getDepthSize();
 	mTexRgb = gl::Texture2d::create(mCinderDS->getRgbWidth(), mCinderDS->getRgbHeight(), gl::Texture2d::Format().internalFormat(GL_RGB8));
+	mChanDepth = Channel16u(mDepthDims.x, mDepthDims.y);
 }
 
 void CloudNineApp::setupScene()
@@ -169,7 +223,18 @@ void CloudNineApp::setupScene()
 	mCamera.setCenterOfInterestPoint(vec3(0, 0, 1.5));
 	mMayaCam.setCurrentCam(mCamera);
 
-	//PointCloud
+	//Skybox
+	mTexSkyBox = gl::TextureCubeMap::create(loadImage(loadAsset("cubemap_ocean.png")), gl::TextureCubeMap::Format().internalFormat(GL_RGBA8));
+	mShaderSkyBox = gl::GlslProg::create(loadAsset("skybox.vert"), loadAsset("skybox.frag"));
+	mBatchSkyBox = gl::Batch::create(geom::Cube(), mShaderSkyBox);
+	mBatchSkyBox->getGlslProg()->uniform("uCubeMapTex", 0);
+
+	setupPointCloud();
+	setupParticles();
+}
+
+void CloudNineApp::setupPointCloud()
+{
 	mPointsCloud.clear();
 	ivec2 cDims = mCinderDS->getDepthSize();
 	for (int dy = 0; dy < cDims.y; ++dy)
@@ -190,14 +255,27 @@ void CloudNineApp::setupScene()
 
 	mShaderCloud = gl::GlslProg::create(loadAsset("cloud.vert"), loadAsset("cloud.frag"));
 	mBatchCloud = gl::Batch::create(mMeshCloud, mShaderCloud, { { geom::CUSTOM_0, "iPosition" }, { geom::CUSTOM_1, "iUV" }, { geom::CUSTOM_2, "iSize" } });
-	mBatchCloud->getGlslProg()->uniform("mTexRgb", 0);
-	mBatchCloud->getGlslProg()->uniform("mTexCube", 1);
+	mBatchCloud->getGlslProg()->uniform("mTexCube", 0);
+}
 
-	//Skybox
-	mTexSkyBox = gl::TextureCubeMap::create(loadImage(loadAsset("cubemap_rs.png")), gl::TextureCubeMap::Format().internalFormat(GL_RGBA8));
-	mShaderSkyBox = gl::GlslProg::create(loadAsset("skybox.vert"), loadAsset("skybox.frag"));
-	mBatchSkyBox = gl::Batch::create(geom::Cube(), mShaderSkyBox);
-	mBatchSkyBox->getGlslProg()->uniform("uCubeMapTex", 0);
+void CloudNineApp::setupParticles()
+{
+	mPointsParticles.clear();
+	mDataInstance_P = gl::Vbo::create(GL_ARRAY_BUFFER, mPointsParticles, GL_DYNAMIC_DRAW);
+	mAttribsInstance_P.append(geom::CUSTOM_3, 3, sizeof(CloudParticle), offsetof(CloudParticle, PPosition), 1);
+	mAttribsInstance_P.append(geom::CUSTOM_4, 1, sizeof(CloudParticle), offsetof(CloudParticle, PSize), 1);
+	mAttribsInstance_P.append(geom::CUSTOM_5, 4, sizeof(CloudParticle), offsetof(CloudParticle, PColor), 1);
+
+	mMesh_P = gl::VboMesh::create(geom::Sphere());
+	mMesh_P->appendVbo(mAttribsInstance_P, mDataInstance_P);
+
+	mShader_P = gl::GlslProg::create(loadAsset("particle.vert"), loadAsset("particle.frag"));
+	mBatch_P = gl::Batch::create(mMesh_P, mShader_P, { { geom::CUSTOM_3, "iPosition" }, { geom::CUSTOM_4, "iSize" }, { geom::CUSTOM_5, "iColor" } });
+	mBatch_P->getGlslProg()->uniform("mTexCube", 0);
+	
+	mPerlin = Perlin();
+	mColorsParticles.push_back(ColorA(ColorA8u(255,218,0,255)));
+	mColorsParticles.push_back(ColorA(ColorA8u(253, 181, 19, 255)));
 }
 
 void CloudNineApp::setupFBO()
@@ -214,20 +292,27 @@ void CloudNineApp::setupGUI()
 	mParamCloudMode.push_back("Hedron");
 
 	mParamColorIndex = 0;
-	mColorsCloud.push_back(ColorA(ColorA8u(126,211,247,255)));
-	mColorsCloud.push_back(ColorA(ColorA8u(0, 174, 239,255)));
-	mColorsCloud.push_back(ColorA(ColorA8u(0, 113, 197,255)));
-	mColorsCloud.push_back(ColorA(ColorA8u(0, 66, 128,255)));
-	mParamColors.push_back("Pale Blue");
-	mParamColors.push_back("Light Blue");
-	mParamColors.push_back("Intel Blue");
+	mColorsCloud.push_back(ColorA(ColorA8u(96,160,108,255)));
+	mColorsCloud.push_back(ColorA(ColorA8u(224, 0, 160,255)));
+	mColorsCloud.push_back(ColorA(ColorA8u(144, 32, 144,255)));
+	mColorsCloud.push_back(ColorA(ColorA8u(32, 16, 192,255)));
+	mParamColors.push_back("Emerald Green");
+	mParamColors.push_back("Magenta");
+	mParamColors.push_back("Purple");
 	mParamColors.push_back("Dark Blue");
+
+	mParamPModeIndex = 0;
+	mParamPModes.push_back("Flow");
+	mParamPModes.push_back("Gravity");
 
 	mParamLightPosX = mParamLightPosY = 500.0f;
 	mParamLightPosZ = 0.0f;
 	mParamSpecPow = 16.0f;
 	mParamSpecStr = 1.0f;
 	mParamAmbStr = 1.0f;
+	mParamReflStr = 1.0f;
+	mParamSpawnCount = 10.0f;
+	mParamMaxCount = 10000;
 	mGUI = InterfaceGl::create("Settings", ivec2(300, 300));
 	mGUI->setPosition(ivec2(20));
 
@@ -241,6 +326,11 @@ void CloudNineApp::setupGUI()
 	mGUI->addParam("Spec Size", &mParamSpecPow);
 	mGUI->addParam("Spec Strength", &mParamSpecStr);
 	mGUI->addParam("Ambient Strength", &mParamAmbStr);
+	mGUI->addSeparator();
+	mGUI->addParam("Particle Motion", mParamPModes, &mParamPModeIndex);
+	mGUI->addParam<int>("Max Particles", &mParamMaxCount);
+	mGUI->addParam<int>("Spawn Count", &mParamSpawnCount);
+	mGUI->addParam<float>("Env Strength", &mParamReflStr);
 	
 }
 void CloudNineApp::mouseDown(MouseEvent event)
@@ -256,6 +346,7 @@ void CloudNineApp::mouseDrag(MouseEvent event)
 void CloudNineApp::update()
 {
 	updatePointCloud();
+	updateParticles();
 }
 
 void CloudNineApp::updatePointCloud()
@@ -263,8 +354,8 @@ void CloudNineApp::updatePointCloud()
 	mCinderDS->update();
 	mTexRgb->update(mCinderDS->getRgbFrame());
 
-	Channel16u cDepth = mCinderDS->getDepthFrame();
-	Channel16u::Iter cIter = cDepth.getIter();
+	mChanDepth = mCinderDS->getDepthFrame();
+	Channel16u::Iter cIter = mChanDepth.getIter();
 
 	mPointsCloud.clear();
 	while (cIter.line())
@@ -276,7 +367,7 @@ void CloudNineApp::updatePointCloud()
 				float cVal = (float)cIter.v();
 				float cX = cIter.x();
 				float cY = cIter.y();
-				if (cVal > 0 && cVal < 1000)
+				if (cVal > S_MIN_Z && cVal < S_MAX_Z)
 				{
 					vec3 cWorld = mCinderDS->getDepthSpacePoint(cX,cY,cVal);
 					vec2 cUV = mCinderDS->getColorCoordsFromDepthSpace(cWorld);
@@ -304,6 +395,55 @@ void CloudNineApp::updatePointCloud()
 	mBatchCloud->replaceVboMesh(mMeshCloud);
 }
 
+void CloudNineApp::updateParticles()
+{
+	for (int sp = 0; sp < mParamSpawnCount; ++sp)
+	{
+		if (mPointsParticles.size() < mParamMaxCount)
+		{
+			int cX = randInt(0, mDepthDims.x);
+			int cY = randInt(0, mDepthDims.y);
+
+			if (cX%mParamCloudRes == 0 && cY%mParamCloudRes == 0)
+			{
+				float cZ = (float)mChanDepth.getValue(ivec2(cX, cY));
+				if (cZ > S_MIN_Z&&cZ < S_MAX_Z)
+				{
+					vec3 cWorld = mCinderDS->getDepthSpacePoint(static_cast<float>(cX),
+						static_cast<float>(cY),
+						static_cast<float>(cZ));
+
+					// pos, acc size life
+					vec3 cAcc(randFloat(-5.f, 5.f), randFloat(0.5f, 3.5f), randFloat(-5.f, 5.f));
+					float cSize = randFloat(0.5f, 1.0f);
+					int cLife = randInt(90, 240);
+					//ColorA cColor = mColorsParticles[sp % 2];
+					ColorA cColor = ColorA::white();
+					
+					mPointsParticles.push_back(CloudParticle(cWorld, cAcc, cSize, cLife, cColor));
+				}
+			}
+		}
+	}
+
+	//now update particles
+	for (auto pit = mPointsParticles.begin(); pit != mPointsParticles.end();)
+	{
+		if (pit->PAge == 0)
+			pit = mPointsParticles.erase(pit);
+		else
+		{
+			pit->step(mPerlin, mParamPModeIndex, mColorsCloud[mParamColorIndex]);
+			++pit;
+		}
+	}
+	
+	mDataInstance_P->bufferData(mPointsParticles.size()*sizeof(CloudParticle), mPointsParticles.data(), GL_DYNAMIC_DRAW);
+	mMesh_P = gl::VboMesh::create(geom::Sphere());
+	mMesh_P->appendVbo(mAttribsInstance_P, mDataInstance_P);
+	mBatch_P->replaceVboMesh(mMesh_P);
+}
+
 void CloudNineApp::updateFBO()
 {
 
@@ -314,8 +454,9 @@ void CloudNineApp::draw()
 	gl::clear(Color(0, 0, 0));
 	gl::setMatrices(mMayaCam.getCamera());
 
-	drawSkyBox();
+	//drawSkyBox();
 	drawPointCloud();
+	drawParticles();
 	drawGUI();
 
 }
@@ -342,15 +483,40 @@ void CloudNineApp::drawPointCloud()
 	gl::scale(vec3(0.01));
 	gl::pushMatrices();
 	gl::scale(vec3(1, -1, 1));
-	mTexRgb->bind(0);
 
-	gl::TextureCubeMapRef cTexSkyBox(mTexSkyBox);
-	cTexSkyBox->bind(1);
+
+	mTexSkyBox->bind(0);
 	mBatchCloud->drawInstanced(mPointsCloud.size());
-	mTexRgb->unbind();
-	cTexSkyBox->unbind();
+	mTexSkyBox->unbind();
+
 	gl::popMatrices();
 	gl::popMatrices();
+}
+
+void CloudNineApp::drawParticles()
+{
+	mBatch_P->getGlslProg()->uniform("ViewDirection", mMayaCam.getCamera().getViewDirection());
+	mBatch_P->getGlslProg()->uniform("ViewPosition", mMayaCam.getCamera().getEyePoint());
+	mBatch_P->getGlslProg()->uniform("LightPosition", vec3(mParamLightPosX, mParamLightPosY, mParamLightPosZ));
+	mBatch_P->getGlslProg()->uniform("SpecPow", mParamSpecPow);
+	mBatch_P->getGlslProg()->uniform("SpecStr", mParamSpecStr);
+	mBatch_P->getGlslProg()->uniform("ReflStr", mParamReflStr);
+
+	//gl::enableAlphaBlending();
+	gl::pushMatrices();
+	gl::scale(vec3(0.01));
+	gl::pushMatrices();
+	gl::scale(vec3(1, -1, 1));
+
+	mTexSkyBox->bind(0);
+	mBatch_P->drawInstanced(mPointsParticles.size());
+	mTexSkyBox->unbind();
+
+	gl::popMatrices();
+	gl::popMatrices();
+	//gl::disableAlphaBlending();
+
+	console() << mMayaCam.getCamera().getEyePoint() << endl;
 }
 
 void CloudNineApp::drawGUI()
