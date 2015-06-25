@@ -3,6 +3,7 @@
 #else
 #pragma comment(lib, "DSAPI.lib")
 #endif
+
 #include "cinder/app/App.h"
 #include "cinder/app/RendererGl.h"
 #include "cinder/gl/gl.h"
@@ -11,7 +12,7 @@
 #include "cinder/gl/GlslProg.h"
 #include "cinder/Camera.h"
 #include "cinder/GeomIo.h"
-#include "cinder/MayaCamUI.h"
+#include "cinder/CameraUi.h"
 #include "cinder/params/Params.h"
 #include "cinder/Rand.h"
 #include "cinder/Perlin.h"
@@ -30,8 +31,7 @@ class CloudNineApp : public App
 {
 public:
 	void setup() override;
-	void mouseDown(MouseEvent event) override;
-	void mouseDrag(MouseEvent event) override;
+	void keyDown(KeyEvent pEvent) override;
 	void update() override;
 	void draw() override;
 	void cleanup() override;
@@ -158,9 +158,12 @@ private:
 	vector<ColorA>			mColorsCloud;
 
 	CameraPersp				mCamera;
-	MayaCamUI				mMayaCam;
+	CameraUi				mMayaCam;
 
 	//Settings
+	bool					mDrawGUI,
+							mParamDrawBG;
+
 	InterfaceGlRef			mGUI;
 
 	int						mParamCloudRes,
@@ -184,7 +187,8 @@ private:
 	vector<string>			mParamColors;
 	vector<string>			mParamPModes;
 
-
+	//Misc
+	int						mLastCloudMode;
 };
 
 void CloudNineApp::setup()
@@ -220,8 +224,8 @@ void CloudNineApp::setupScene()
 	//Camera
 	mCamera.setPerspective(45.0f, getWindowAspectRatio(), .01, 100);
 	mCamera.lookAt(vec3(0), vec3(0, 0, 1), vec3(0, 1, 0));
-	mCamera.setCenterOfInterestPoint(vec3(0, 0, 1.5));
-	mMayaCam.setCurrentCam(mCamera);
+	mCamera.setPivotDistance(1.5f);
+	mMayaCam = CameraUi(&mCamera, getWindow());
 
 	//Skybox
 	mTexSkyBox = gl::TextureCubeMap::create(loadImage(loadAsset("cubemap_ocean.png")), gl::TextureCubeMap::Format().internalFormat(GL_RGBA8));
@@ -266,7 +270,7 @@ void CloudNineApp::setupParticles()
 	mAttribsInstance_P.append(geom::CUSTOM_4, 1, sizeof(CloudParticle), offsetof(CloudParticle, PSize), 1);
 	mAttribsInstance_P.append(geom::CUSTOM_5, 4, sizeof(CloudParticle), offsetof(CloudParticle, PColor), 1);
 
-	mMesh_P = gl::VboMesh::create(geom::Sphere());
+	mMesh_P = gl::VboMesh::create(geom::Cube());
 	mMesh_P->appendVbo(mAttribsInstance_P, mDataInstance_P);
 
 	mShader_P = gl::GlslProg::create(loadAsset("particle.vert"), loadAsset("particle.frag"));
@@ -313,6 +317,7 @@ void CloudNineApp::setupGUI()
 	mParamReflStr = 1.0f;
 	mParamSpawnCount = 10.0f;
 	mParamMaxCount = 10000;
+	mParamDrawBG = true;
 	mGUI = InterfaceGl::create("Settings", ivec2(300, 300));
 	mGUI->setPosition(ivec2(20));
 
@@ -331,16 +336,13 @@ void CloudNineApp::setupGUI()
 	mGUI->addParam<int>("Max Particles", &mParamMaxCount);
 	mGUI->addParam<int>("Spawn Count", &mParamSpawnCount);
 	mGUI->addParam<float>("Env Strength", &mParamReflStr);
+	mGUI->addParam<bool>("Draw Skybox", &mParamDrawBG);
 	
 }
-void CloudNineApp::mouseDown(MouseEvent event)
+void CloudNineApp::keyDown(KeyEvent pEvent)
 {
-	mMayaCam.mouseDown(event.getPos());
-}
-
-void CloudNineApp::mouseDrag(MouseEvent event)
-{
-	mMayaCam.mouseDrag(event.getPos(), event.isLeftDown(), false, event.isRightDown());
+	if (pEvent.getCode() == KeyEvent::KEY_d)
+		mDrawGUI = !mDrawGUI;
 }
 
 void CloudNineApp::update()
@@ -377,22 +379,28 @@ void CloudNineApp::updatePointCloud()
 		}
 	}
 
-	switch (mParamCloudModeIndex)
+	mDataInstance->bufferData(mPointsCloud.size()*sizeof(CloudPoint), mPointsCloud.data(), GL_DYNAMIC_DRAW);
+	
+	if (mParamCloudModeIndex != mLastCloudMode)
 	{
-	case 0:
-		mMeshCloud = gl::VboMesh::create(geom::Sphere());
-		break;
-	case 1:
-		mMeshCloud = gl::VboMesh::create(geom::Cube());
-		break;
-	case 2:
-		mMeshCloud = gl::VboMesh::create(geom::Icosahedron());
-		break;
+		switch (mParamCloudModeIndex)
+		{
+			case 0:
+				mMeshCloud = gl::VboMesh::create(geom::Sphere());
+				break;
+			case 1:
+				mMeshCloud = gl::VboMesh::create(geom::Cube());
+				break;
+			case 2:
+				mMeshCloud = gl::VboMesh::create(geom::Icosahedron());
+				break;
+		}
+		
+		mMeshCloud->appendVbo(mAttribsInstance, mDataInstance);
+		mBatchCloud->replaceVboMesh(mMeshCloud);
 	}
 
-	mDataInstance->bufferData(mPointsCloud.size()*sizeof(CloudPoint), mPointsCloud.data(), GL_DYNAMIC_DRAW);
-	mMeshCloud->appendVbo(mAttribsInstance, mDataInstance);
-	mBatchCloud->replaceVboMesh(mMeshCloud);
+	mLastCloudMode = mParamCloudModeIndex;
 }
 
 void CloudNineApp::updateParticles()
@@ -415,7 +423,7 @@ void CloudNineApp::updateParticles()
 
 					// pos, acc size life
 					vec3 cAcc(randFloat(-5.f, 5.f), randFloat(0.5f, 3.5f), randFloat(-5.f, 5.f));
-					float cSize = randFloat(0.5f, 1.0f);
+					float cSize = randFloat(mParamSize*0.25f, mParamSize);
 					int cLife = randInt(90, 240);
 					//ColorA cColor = mColorsParticles[sp % 2];
 					ColorA cColor = ColorA::white();
@@ -439,9 +447,6 @@ void CloudNineApp::updateParticles()
 	}
 	
 	mDataInstance_P->bufferData(mPointsParticles.size()*sizeof(CloudParticle), mPointsParticles.data(), GL_DYNAMIC_DRAW);
-	mMesh_P = gl::VboMesh::create(geom::Sphere());
-	mMesh_P->appendVbo(mAttribsInstance_P, mDataInstance_P);
-	mBatch_P->replaceVboMesh(mMesh_P);
 }
 
 void CloudNineApp::updateFBO()
@@ -454,10 +459,12 @@ void CloudNineApp::draw()
 	gl::clear(Color(0, 0, 0));
 	gl::setMatrices(mMayaCam.getCamera());
 
-	//drawSkyBox();
+	if (mParamDrawBG)
+		drawSkyBox();
 	drawPointCloud();
 	drawParticles();
-	drawGUI();
+	if (mDrawGUI)
+		drawGUI();
 
 }
 
